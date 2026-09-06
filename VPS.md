@@ -70,22 +70,12 @@ Decile al cliente:
 
 ## Si preferís GitHub (para actualizar más fácil después)
 
-En tu PC, en esta carpeta:
-
-```powershell
-git init
-git add .
-git commit -m "Smashr listo para demo en VPS"
-# Creá un repo vacío en GitHub y:
-git remote add origin https://github.com/TU_USER/TU_REPO.git
-git branch -M main
-git push -u origin main
-```
+Repo del proyecto: https://github.com/pmuruaga/smashr2.git
 
 En el VPS:
 
 ```bash
-git clone https://github.com/TU_USER/TU_REPO.git smashr
+git clone https://github.com/pmuruaga/smashr2.git smashr
 cd smashr
 chmod +x scripts/vps-setup.sh
 ./scripts/vps-setup.sh
