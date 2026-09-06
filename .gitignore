@@ -1,0 +1,10 @@
+node_modules/
+dist/
+*.db
+.env
+.DS_Store
+server/uploads/
+*.tgz
+*.zip
+.vscode/
+.idea/
