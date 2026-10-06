@@ -1,32 +1,30 @@
-import { createContext, useContext, useState, useCallback } from "react";
+import { createContext, useContext, useState, useCallback, useEffect } from "react";
+import { api, TOKEN_KEY } from "../services/api.js";
 
 const AuthContext = createContext(null);
 
-const INTERNAL_PASSWORD = "padel2025";
-
 export function AuthProvider({ children }) {
-  const [isLoggedIn, setIsLoggedIn] = useState(
-    localStorage.getItem("isLoggedIn") === "1"
-  );
-
-  const login = useCallback((password) => {
-    if (password === INTERNAL_PASSWORD) {
-      localStorage.setItem("isLoggedIn", "1");
-      setIsLoggedIn(true);
-      return true;
-    }
-    return false;
-  }, []);
+  const [isLoggedIn, setIsLoggedIn] = useState(() => Boolean(localStorage.getItem(TOKEN_KEY)));
 
   const logout = useCallback(() => {
+    localStorage.removeItem(TOKEN_KEY);
     localStorage.removeItem("isLoggedIn");
     setIsLoggedIn(false);
   }, []);
 
+  const login = useCallback(async (password) => {
+    const res = await api.login(password);
+    localStorage.setItem(TOKEN_KEY, res.token);
+    setIsLoggedIn(true);
+  }, []);
+
+  useEffect(() => {
+    window.addEventListener("smashr:unauthorized", logout);
+    return () => window.removeEventListener("smashr:unauthorized", logout);
+  }, [logout]);
+
   return (
-    <AuthContext.Provider value={{ isLoggedIn, login, logout }}>
-      {children}
-    </AuthContext.Provider>
+    <AuthContext.Provider value={{ isLoggedIn, login, logout }}>{children}</AuthContext.Provider>
   );
 }
 

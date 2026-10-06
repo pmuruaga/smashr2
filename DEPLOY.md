@@ -1,53 +1,63 @@
-# Despliegue — Torneo Smaash (control + tablero TV)
+# Despliegue — SMASHR (gestión + tableros por partido)
 
-El sistema tiene **dos pantallas** que deben verse al mismo tiempo:
+## Cómo funciona
 
 | Pantalla | URL | Quién la usa |
 |----------|-----|--------------|
-| **Gestión / control** | `/` → login → control | Operador de cancha |
-| **Tablero TV (público)** | `/tablero` | Público / proyector / TV |
+| **Gestión** | `/` (login) | Organizador / administradores |
+| **Control de un partido** | `/control/:id` | Quien puntúa ese partido (requiere login) |
+| **Tablero de un partido** | `/tablero/:codigo` | Público, TV de la cancha, celulares (solo lectura) |
+| **Publicidad** | `/publicidad` | Banners que rotan en todos los tableros |
 
-Ambas se sincronizan por **SSE** (`/api/sse/events`). En el evento: abrí el control en una notebook/tablet y el tablero en la TV (pantalla completa F11).
+- Se pueden jugar **varios partidos a la vez**: cada uno tiene su control y su tablero.
+- Cada partido tiene un **código** (ej. `q48knec`) que forma su link público. Se comparte desde
+  el botón *Compartir* (copiar link, WhatsApp o QR para imprimir en la cancha).
+- Los tableros se actualizan en vivo por SSE (`/api/sse/partido/:codigo`).
+- Toda escritura de la API exige el token que se obtiene al ingresar con la contraseña.
+  Los links de tablero solo permiten **ver**.
+- Si dos personas puntúan el mismo partido a la vez, la segunda recibe un aviso y se le carga el
+  marcador actual (no se pisan puntos).
 
-Ver también: [VPS.md](./VPS.md) (pasos cortos para subir a tu VPS y mandarle el link al cliente).
-
-## Requisitos
-
-- Node.js 20+
-- Espacio en disco escribible (SQLite + uploads de banners/fondos)
-
-## Instalación (servidor / VPS)
-
-```bash
-npm run install:all
-npm run prisma:deploy
-npm run build
-npm start
-```
-
-`prisma:deploy` aplica el schema a SQLite (`db push`) y regenera el client.
-
-Queda un solo proceso en el puerto `PORT` (default **3001**) que sirve:
-
-- API: `/api/*`
-- Uploads: `/uploads/*`
-- Front (build Vite): `/`, `/tablero`, etc.
-
-Abrí:
-
-- Gestión: `http://TU_HOST:3001/`
-- TV: `http://TU_HOST:3001/tablero`
+Ver también: [VPS.md](./VPS.md).
 
 ## Variables de entorno
 
-Creá `server/.env` si hace falta (Prisma ya usa SQLite por defecto):
+| Variable | Default | Para qué |
+|----------|---------|----------|
+| `PORT` | `3001` | Puerto del proceso (en el VPS de prueba: `3010`) |
+| `ADMIN_PASSWORD` | `padel2025` | Contraseña de gestión. **Cambiala en producción.** |
+| `AUTH_SECRET` | valor fijo de desarrollo | Firma del token de sesión. Poné un texto largo al azar. |
 
-```
-PORT=3001
-DATABASE_URL="file:./dev.db"
+Cambiar `ADMIN_PASSWORD` o `AUTH_SECRET` cierra la sesión de todos los dispositivos.
+
+## Actualizar el VPS actual (PM2 en `/var/www/smashr`, puerto 3010)
+
+```bash
+cd /var/www/smashr
+# traer el código nuevo (git pull o copiar el tgz y descomprimir encima)
+git pull
+
+# backup de la DB + dependencias + schema + build
+bash scripts/vps-setup.sh
+
+# reiniciar con las variables nuevas (la primera vez definilas así)
+PORT=3010 ADMIN_PASSWORD='la-nueva-clave' AUTH_SECRET='un-texto-largo-al-azar' \
+  pm2 restart smashr --update-env
+pm2 save
 ```
 
-Opcional: cambiar la ruta de la DB a un volumen persistente en el host.
+Qué hace el cambio de base de datos: `prisma db push` **agrega** columnas (`codigo`, `torneo`,
+`cancha`, `version`); no borra datos. Al arrancar, el servidor genera el código de link para los
+partidos viejos. El backup queda en `backups/dev.db.FECHA`.
+
+Verificar:
+
+```bash
+curl -s http://127.0.0.1:3010/api/health
+curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:3010/api/partido/lista   # 401 = protegido OK
+```
+
+Demo opcional con varias canchas: `bash scripts/seed-demo.sh http://127.0.0.1:3010/api 'la-clave'`.
 
 ## Desarrollo local (2 procesos)
 
@@ -57,22 +67,19 @@ npm run prisma:deploy
 npm run dev
 ```
 
-- Front: http://localhost:5173  
-- API: http://localhost:3001  
-- Vite proxyea `/api` y `/uploads` al backend.
+- Front: http://localhost:5173 — API: http://localhost:3001 (Vite proxyea `/api` y `/uploads`).
 
 ## Checklist pre-evento
 
-1. Login en gestión (`padel2025` por defecto — cambialo en `client/src/context/AuthContext.jsx` antes de producción).
-2. Crear partido de prueba.
-3. Abrir **dos ventanas**: control + `/tablero`.
-4. Sumar puntos y confirmar que la TV actualiza al instante.
-5. Probar calentamiento, descanso, deshacer, banners y fondo.
-6. En la TV: F11 (pantalla completa).
+1. Ingresar a la gestión y crear los partidos. Solo los jugadores son obligatorios; torneo/liga,
+   cancha e instancia son opcionales (sirven para mostrarlos en el tablero y filtrar en el panel).
+2. En cada partido: *Compartir* → abrir el link en la TV de esa cancha (botón de pantalla completa
+   abajo a la derecha) y/o imprimir el QR.
+3. Sumar puntos desde el control y confirmar que el tablero cambia al instante.
+4. Probar deshacer, calentamiento, descanso, fondo y banners.
 
-## Notas importantes
+## Notas
 
-- **Auth**: la contraseña solo protege el front; la API no tiene auth. Usar en red controlada (LAN del club) o poner un reverse proxy con basic auth.
-- **SQLite**: no es ideal para multi-instancia; un solo proceso Node.
-- **Uploads**: `server/uploads/` debe persistir entre deploys (volumen o backup).
-- Este producto es **control de partido + marcador TV**, no brackets/fixture completo de torneo.
+- **SQLite**: un solo proceso Node (no escalar a varias instancias).
+- **Uploads** (`server/uploads/`) y la base (`server/prisma/dev.db`) deben persistir entre deploys.
+- Con Nginx delante, dejar `proxy_buffering off;` para que los tableros reciban los cambios en vivo.

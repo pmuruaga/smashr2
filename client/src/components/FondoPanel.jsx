@@ -1,117 +1,81 @@
 import { useState } from "react";
-import { api } from "../services/api.js";
-import { usePartido } from "../context/PartidoContext.jsx";
 import Button from "./Button.jsx";
-import { ExternalLink, ImagePlus } from "lucide-react";
+import { ImagePlus, RotateCcw } from "lucide-react";
 
-/** Subir / restaurar fondo del tablero TV */
-export default function FondoPanel({ compact = false }) {
-  const { partido, setPantalla, aplicarPantallaLocal } = usePartido();
-  const [fondoMsg, setFondoMsg] = useState("");
-
-  if (!partido) {
-    return (
-      <div
-        className="rounded-2xl border-2 border-dashed p-4 text-sm"
-        style={{
-          borderColor: "#9aaf90",
-          backgroundColor: "#ffffff",
-          color: "#3d4f40",
-        }}
-      >
-        Activá o creá un partido para cambiar el fondo de la TV.
-      </div>
-    );
-  }
+/** Fondo del tablero de UN partido. */
+export default function FondoPanel({ pantalla, onUpload, onReset }) {
+  const [msg, setMsg] = useState("");
+  const [busy, setBusy] = useState(false);
 
   return (
-    <div
-      id="fondo-tv"
-      className={`rounded-2xl border-2 shadow-sm ${compact ? "p-3" : "p-4 sm:p-5"} space-y-3`}
-      style={{ borderColor: "#9aaf90", backgroundColor: "#ffffff" }}
-    >
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div>
-          <h3
-            className={`font-bold ${compact ? "text-base" : "text-base sm:text-lg"}`}
-            style={{ color: "#1a241c" }}
-          >
-            Fondo del tablero (TV)
-          </h3>
-          {!compact && (
-            <p className="mt-0.5 text-sm" style={{ color: "#3d4f40" }}>
-              Subí una imagen para el fondo de la pantalla del partido activo.
-            </p>
-          )}
-        </div>
+    <div className="space-y-3 rounded-2xl border-2 border-[#c5d0bc] bg-white p-4 sm:p-5">
+      <div>
+        <h3 className="font-bold">Fondo del tablero</h3>
+        <p className="mt-0.5 text-sm text-[#3d4f40]">
+          Imagen de fondo solo para este partido (por ejemplo, el logo del torneo o del
+          sponsor de la cancha). Ideal horizontal 16:9.
+        </p>
+      </div>
+
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+        <div
+          className="aspect-video w-full shrink-0 overflow-hidden rounded-lg sm:w-48"
+          style={{
+            border: "2px solid #c5d0bc",
+            background: pantalla
+              ? `center / cover no-repeat url("${pantalla}")`
+              : "linear-gradient(135deg, #0f3b44 0%, #1d1d2b 55%, #5a1f2c 100%)",
+          }}
+          aria-label={pantalla ? "Fondo actual" : "Fondo por defecto"}
+        />
         <div className="flex flex-wrap gap-2">
           <label
-            className="inline-flex cursor-pointer items-center gap-1.5 rounded-xl px-3 py-2.5 text-sm font-bold text-white"
+            className={`inline-flex cursor-pointer items-center gap-1.5 rounded-xl px-3 py-2.5 text-sm font-bold text-white ${busy ? "opacity-60" : ""}`}
             style={{ backgroundColor: "#2f6b08" }}
           >
-            <ImagePlus size={16} /> Subir fondo
+            <ImagePlus size={16} /> {pantalla ? "Cambiar fondo" : "Subir fondo"}
             <input
               type="file"
               accept="image/*"
               className="hidden"
+              disabled={busy}
               onChange={async (e) => {
                 const file = e.target.files?.[0];
                 if (!file) return;
-                setFondoMsg("Subiendo…");
+                setBusy(true);
+                setMsg("Subiendo…");
                 try {
-                  const res = await api.uploadPantalla(file);
-                  if (!res?.url) throw new Error("Sin URL");
-                  aplicarPantallaLocal(res.url);
-                  setFondoMsg("Fondo aplicado en la TV.");
+                  await onUpload(file);
+                  setMsg("Fondo aplicado en el tablero.");
                 } catch (err) {
-                  setFondoMsg("");
-                  alert(`No se pudo subir el fondo: ${err.message}`);
+                  setMsg(`No se pudo subir: ${err.message}`);
                 } finally {
+                  setBusy(false);
                   e.target.value = "";
                 }
               }}
             />
           </label>
-          <Button
-            variant="secondary"
-            onClick={async () => {
-              await setPantalla("");
-              setFondoMsg("Fondo por defecto restaurado");
-            }}
-          >
-            Fondo default
-          </Button>
-          <Button
-            variant="ghost"
-            onClick={() => window.open("/tablero", "_blank")}
-          >
-            <ExternalLink size={14} /> Ver TV
-          </Button>
+          {pantalla && (
+            <Button
+              variant="secondary"
+              disabled={busy}
+              onClick={async () => {
+                setBusy(true);
+                try {
+                  await onReset();
+                  setMsg("Se volvió al fondo por defecto.");
+                } finally {
+                  setBusy(false);
+                }
+              }}
+            >
+              <RotateCcw size={16} /> Quitar fondo
+            </Button>
+          )}
         </div>
       </div>
-
-      {(fondoMsg || partido.pantalla_actual) && (
-        <div className="flex items-start gap-4">
-          {partido.pantalla_actual ? (
-            <img
-              src={partido.pantalla_actual}
-              alt="Fondo actual"
-              className="h-24 w-40 shrink-0 rounded-lg object-cover"
-              style={{ border: "2px solid #c5d0bc", backgroundColor: "#eef3ea" }}
-            />
-          ) : null}
-          <div className="text-sm">
-            <p className="font-medium" style={{ color: "#1a241c" }}>
-              {fondoMsg || "Fondo personalizado activo"}
-            </p>
-            {partido.pantalla_actual && (
-              <p className="mt-1 break-all text-xs" style={{ color: "#5a6b5c" }}>
-                {partido.pantalla_actual}
-              </p>
-            )}
-          </div>
-        </div>
-      )}
+      {msg && <p className="text-sm font-medium">{msg}</p>}
     </div>
   );
 }

@@ -6,6 +6,8 @@ import { fileURLToPath } from "url";
 import partidoRoutes from "./routes/partidoRoutes.js";
 import publicidadRoutes from "./routes/publicidadRoutes.js";
 import { sseRouter } from "./routes/sseRoutes.js";
+import { checkPassword, issueToken, requireAdmin } from "./auth.js";
+import { ensureCodigos, getTableroPublico } from "./controllers/partidoController.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -19,6 +21,15 @@ app.use(cors());
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true }));
 
+app.post("/api/auth/login", (req, res) => {
+  if (!checkPassword(req.body?.password)) {
+    return res.status(401).json({ status: "error", message: "Contraseña incorrecta" });
+  }
+  res.json({ status: "ok", token: issueToken() });
+});
+app.get("/api/auth/check", requireAdmin, (_req, res) => res.json({ status: "ok" }));
+
+app.get("/api/tablero/:codigo", getTableroPublico);
 app.use("/api/partido", partidoRoutes);
 app.use("/api/publicidad", publicidadRoutes);
 app.use("/api/sse", sseRouter);
@@ -42,9 +53,13 @@ if (isProd && fs.existsSync(clientDist)) {
   console.log(`Serving client from ${clientDist}`);
 }
 
-app.listen(PORT, "0.0.0.0", () => {
-  console.log(`Server running on http://0.0.0.0:${PORT}`);
-  if (!isProd) {
-    console.log("Dev mode: use Vite on :5173 (proxied /api → this server)");
-  }
-});
+ensureCodigos()
+  .catch((err) => console.error("No se pudieron generar códigos de partido:", err))
+  .finally(() => {
+    app.listen(PORT, "0.0.0.0", () => {
+      console.log(`Server running on http://0.0.0.0:${PORT}`);
+      if (!isProd) {
+        console.log("Dev mode: use Vite on :5173 (proxied /api → this server)");
+      }
+    });
+  });

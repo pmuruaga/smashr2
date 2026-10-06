@@ -3,6 +3,8 @@ import multer from "multer";
 import path from "path";
 import { fileURLToPath } from "url";
 import fs from "fs";
+import { requireAdmin } from "../auth.js";
+import { notifyEverywhere } from "./sseRoutes.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const bannersDir = path.join(__dirname, "..", "..", "uploads", "banners");
@@ -59,6 +61,11 @@ function writeConfig(cfg) {
   fs.writeFileSync(configPath, JSON.stringify(cfg, null, 2), "utf8");
 }
 
+function saveAndNotify(cfg) {
+  writeConfig(cfg);
+  notifyEverywhere({ type: "publicidad" });
+}
+
 function sortedItems(cfg) {
   return [...cfg.items].sort((a, b) => a.order - b.order);
 }
@@ -112,7 +119,7 @@ router.get("/banners", (_req, res) => {
   res.json({ status: "ok", data: responsePayload(cfg) });
 });
 
-router.patch("/banners", (req, res) => {
+router.patch("/banners", requireAdmin, (req, res) => {
   try {
     const cfg = readConfig();
     const { items, intervalMs } = req.body || {};
@@ -146,14 +153,14 @@ router.patch("/banners", (req, res) => {
       cfg.items = next.map((i, idx) => ({ ...i, order: idx }));
     }
 
-    writeConfig(cfg);
+    saveAndNotify(cfg);
     res.json({ status: "ok", data: responsePayload(cfg) });
   } catch (error) {
     res.status(500).json({ status: "error", message: error.message });
   }
 });
 
-router.post("/banners", (req, res) => {
+router.post("/banners", requireAdmin, (req, res) => {
   upload.single("imagen")(req, res, (err) => {
     if (err) {
       return res.status(400).json({ status: "error", message: err.message || "Error al subir" });
@@ -171,12 +178,12 @@ router.post("/banners", (req, res) => {
       order: maxOrder + 1,
       isDefault: false,
     });
-    writeConfig(cfg);
+    saveAndNotify(cfg);
     res.json({ status: "ok", url, data: responsePayload(cfg) });
   });
 });
 
-router.delete("/banners/:id", (req, res) => {
+router.delete("/banners/:id", requireAdmin, (req, res) => {
   const cfg = readConfig();
   const id = req.params.id;
   const item = cfg.items.find((i) => i.id === id);
@@ -207,7 +214,7 @@ function deleteItem(cfg, item, res) {
   cfg.items = cfg.items
     .filter((i) => i.id !== item.id)
     .map((i, idx) => ({ ...i, order: idx }));
-  writeConfig(cfg);
+  saveAndNotify(cfg);
   res.json({ status: "ok", data: responsePayload(cfg) });
 }
 

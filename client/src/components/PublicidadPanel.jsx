@@ -170,8 +170,8 @@ export default function PublicidadPanel() {
         <div>
           <h3 className="font-semibold text-lg text-court-text">Publicidad (banners)</h3>
           <p className="text-sm text-court-muted">
-            Elegí cuáles se muestran, el orden y el intervalo. El strip del tablero
-            solo aparece en la vista de marcador (no en calentamiento/descanso).
+            Se muestran en los tableros de todos los partidos. Elegí cuáles, el orden y
+            el intervalo; los cambios llegan a las pantallas abiertas al instante.
           </p>
         </div>
           <label className="inline-flex cursor-pointer items-center gap-1 rounded-xl bg-[#2f6b08] px-3 py-2 text-sm font-bold text-white shrink-0 hover:bg-[#255506]">

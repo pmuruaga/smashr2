@@ -1,235 +1,191 @@
-import { useCallback, useEffect, useState } from "react";
+import { useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { usePartido } from "../context/PartidoContext.jsx";
+import { Plus, Search } from "lucide-react";
 import AppShell from "../components/AppShell.jsx";
 import Button from "../components/Button.jsx";
 import MatchCard, { teamLabel } from "../components/MatchCard.jsx";
-import ConfirmNewMatchModal from "../components/ConfirmNewMatchModal.jsx";
-import FondoPanel from "../components/FondoPanel.jsx";
-import { Monitor, Plus } from "lucide-react";
+import ShareModal from "../components/ShareModal.jsx";
+import { usePartidosLista } from "../hooks/usePartidosLista.js";
 
-function partidoToCard(partido) {
-  if (!partido) return null;
-  let status = "en_juego";
-  if (partido.finalizado || partido.juego?.equipoGanador) status = "finalizado";
-  else if (
-    partido.calentamiento?.activo &&
-    partido.calentamiento.fin > Date.now()
-  )
-    status = "calentamiento";
-  else if (partido.descanso?.activo && partido.descanso.fin > Date.now())
-    status = "descanso";
+const FILTROS = [
+  { id: "en_curso", label: "En curso" },
+  { id: "finalizados", label: "Finalizados" },
+  { id: "todos", label: "Todos" },
+];
 
-  return {
-    id: partido.id,
-    etapa: partido.juego?.etapa,
-    activo: true,
-    finalizado: Boolean(partido.finalizado || partido.juego?.equipoGanador),
-    status,
-    equipo1: partido.equipo1,
-    equipo2: partido.equipo2,
-    sets: partido.puntos?.sets || [],
-    game: partido.puntos?.game || [0, 0],
-  };
+const SIN_TORNEO = "__sin_torneo__";
+
+function normalizar(s) {
+  return String(s || "")
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "");
+}
+
+function compararCancha(a, b) {
+  return String(a.cancha || "~").localeCompare(String(b.cancha || "~"), "es", { numeric: true });
 }
 
 export default function Home() {
   const navigate = useNavigate();
-  const { partido, loading, listarPartidos, activarPartido, fetchPartido } =
-    usePartido();
-  const [lista, setLista] = useState([]);
-  const [busy, setBusy] = useState(false);
-  const [confirmOpen, setConfirmOpen] = useState(false);
+  const { lista, loading, error } = usePartidosLista();
+  const [filtro, setFiltro] = useState("en_curso");
+  const [torneo, setTorneo] = useState("");
+  const [busqueda, setBusqueda] = useState("");
+  const [share, setShare] = useState(null);
 
-  const refreshLista = useCallback(async () => {
-    try {
-      const data = await listarPartidos();
-      setLista(data);
-    } catch {
-      /* ignore */
-    }
-  }, [listarPartidos]);
+  const enCurso = lista.filter((m) => !m.finalizado);
+  const torneos = useMemo(
+    () => [...new Set(lista.map((m) => m.torneo).filter(Boolean))].sort(),
+    [lista]
+  );
 
-  useEffect(() => {
-    refreshLista();
-  }, [refreshLista, partido?.id, partido?.puntos?.sets, partido?.finalizado]);
+  const visibles = useMemo(() => {
+    const q = normalizar(busqueda);
+    const out = lista.filter((m) => {
+      if (filtro === "en_curso" && m.finalizado) return false;
+      if (filtro === "finalizados" && !m.finalizado) return false;
+      if (torneo === SIN_TORNEO ? m.torneo : torneo && m.torneo !== torneo) return false;
+      if (!q) return true;
+      const hay = normalizar(
+        [teamLabel(m.equipo1), teamLabel(m.equipo2), m.cancha, m.torneo, m.etapa].join(" ")
+      );
+      return hay.includes(q);
+    });
+    // En curso: ordenados por cancha para ubicarlos rápido
+    return filtro === "en_curso" ? out.sort(compararCancha) : out;
+  }, [lista, filtro, torneo, busqueda]);
 
-  const activoCard = partidoToCard(partido);
-  const enJuego = Boolean(activoCard && !activoCard.finalizado);
-  const hayActivo = Boolean(activoCard);
-  const activeLabel = activoCard
-    ? `${teamLabel(activoCard.equipo1)} vs ${teamLabel(activoCard.equipo2)}`
-    : "";
-
-  const otros = lista.filter((m) => !m.activo);
-
-  /** Sin partido activo o el activo ya terminó → ir directo al formulario */
-  const goCreate = () => {
-    if (enJuego) {
-      setConfirmOpen(true);
-      return;
-    }
-    navigate("/nuevo-partido");
-  };
-
-  const confirmAndGoCreate = () => {
-    setConfirmOpen(false);
-    sessionStorage.setItem("smashr_crear_confirmado", "1");
-    navigate("/nuevo-partido");
-  };
-
-  const handleActivate = async (id) => {
-    setBusy(true);
-    try {
-      await activarPartido(id);
-      await refreshLista();
-      navigate("/control");
-    } catch (err) {
-      alert(err.message);
-    } finally {
-      setBusy(false);
-    }
-  };
+  const openTv = (m) => window.open(`/tablero/${m.codigo}`, "_blank");
 
   return (
-    <AppShell
-      actions={
-        <Button
-          variant="ghost"
-          className="!py-1.5 !px-2"
-          onClick={() => window.open("/tablero", "_blank")}
-        >
-          <Monitor size={16} />
-          <span className="hidden sm:inline">TV</span>
-        </Button>
-      }
-    >
-      <div className="space-y-8">
-        <section className="space-y-2">
-          <p
-            className="text-xs font-bold uppercase tracking-[0.2em]"
-            style={{ color: "#2f6b08" }}
-          >
-            Control de cancha
-          </p>
-          <h2
-            className="text-3xl font-bold tracking-tight sm:text-4xl"
-            style={{ color: "#1a241c" }}
-          >
-            Partidos
-          </h2>
-          <p className="max-w-xl text-sm sm:text-base" style={{ color: "#3d4f40" }}>
-            {enJuego
-              ? "Hay un partido en juego. Podés puntuarlo, abrir la TV o crear otro (te vamos a pedir confirmación)."
-              : hayActivo
-                ? "El partido activo ya terminó. Podés ver la TV o crear uno nuevo."
-                : "No hay partido activo. Creá uno para puntuar y mostrar en la TV."}
-          </p>
+    <AppShell wide>
+      <div className="space-y-5 sm:space-y-6">
+        <section className="flex flex-wrap items-end justify-between gap-3">
+          <div>
+            <h2 className="text-2xl font-bold tracking-tight sm:text-3xl">Partidos</h2>
+            <p className="mt-1 text-sm text-[#3d4f40]">
+              {enCurso.length === 0
+                ? "No hay partidos en curso."
+                : enCurso.length === 1
+                  ? "1 partido en curso."
+                  : `${enCurso.length} partidos en curso al mismo tiempo.`}{" "}
+              Cada uno tiene su propio tablero para compartir.
+            </p>
+          </div>
+          <Button onClick={() => navigate("/nuevo-partido")} className="w-full sm:w-auto">
+            <Plus size={18} /> Nuevo partido
+          </Button>
         </section>
 
-        <section className="space-y-3">
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <h3
-              className="text-sm font-bold uppercase tracking-wider"
-              style={{ color: "#3d4f40" }}
-            >
-              {enJuego
-                ? "Partido en curso"
-                : hayActivo
-                  ? "Último partido activo"
-                  : "Partido activo"}
-            </h3>
-            <Button variant="secondary" onClick={goCreate} className="!py-2">
-              <Plus size={16} /> Crear partido
-            </Button>
+        <section className="flex flex-col gap-2 lg:flex-row lg:items-center">
+          <div
+            className="flex w-full shrink-0 rounded-xl border-2 border-[#c5d0bc] bg-white p-1 lg:inline-flex lg:w-auto"
+            role="tablist"
+          >
+            {FILTROS.map((f) => {
+              const count =
+                f.id === "en_curso"
+                  ? enCurso.length
+                  : f.id === "finalizados"
+                    ? lista.length - enCurso.length
+                    : lista.length;
+              const active = filtro === f.id;
+              return (
+                <button
+                  key={f.id}
+                  type="button"
+                  role="tab"
+                  aria-selected={active}
+                  onClick={() => setFiltro(f.id)}
+                  className={`flex-1 whitespace-nowrap rounded-lg px-2 py-1.5 text-sm font-semibold transition sm:px-3 ${
+                    active ? "bg-[#1a241c] text-white" : "text-[#3d4f40] hover:bg-[#eef3ea]"
+                  }`}
+                >
+                  {f.label} <span className="opacity-70">{count}</span>
+                </button>
+              );
+            })}
           </div>
 
-          {loading ? (
-            <div
-              className="rounded-2xl border-2 p-8 text-center"
-              style={{
-                borderColor: "#c5d0bc",
-                backgroundColor: "#ffffff",
-                color: "#3d4f40",
-              }}
-            >
-              Cargando…
-            </div>
-          ) : hayActivo ? (
-            <div className="space-y-3">
-              <MatchCard
-                match={activoCard}
-                highlight
-                busy={busy}
-                onScore={() => navigate("/control")}
-                onOpenTv={() => window.open("/tablero", "_blank")}
+          <div className="flex flex-1 flex-col gap-2 sm:flex-row">
+            {torneos.length > 0 && (
+              <select
+                value={torneo}
+                onChange={(e) => setTorneo(e.target.value)}
+                className="ui-field sm:!w-56"
+                aria-label="Filtrar por torneo"
+              >
+                <option value="">Todos los partidos</option>
+                <option value={SIN_TORNEO}>Partidos sin torneo</option>
+                {torneos.map((t) => (
+                  <option key={t} value={t}>
+                    {t}
+                  </option>
+                ))}
+              </select>
+            )}
+            <label className="relative flex-1">
+              <Search
+                size={16}
+                className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-[#7a8a7c]"
               />
-              <FondoPanel />
-            </div>
-          ) : (
-            <div
-              className="rounded-2xl border-2 border-dashed p-8 text-center"
-              style={{
-                borderColor: "#9aaf90",
-                backgroundColor: "#ffffff",
-                color: "#3d4f40",
-              }}
-            >
-              <p className="mb-4">
-                Todavía no hay partido activo. Creá el primero para empezar.
-              </p>
-              <Button onClick={() => navigate("/nuevo-partido")}>
-                <Plus size={18} /> Crear primer partido
-              </Button>
-            </div>
-          )}
+              <input
+                type="search"
+                value={busqueda}
+                onChange={(e) => setBusqueda(e.target.value)}
+                placeholder="Buscar jugador, cancha o torneo"
+                className="ui-field !pl-9"
+              />
+            </label>
+          </div>
         </section>
 
-        <section className="space-y-3">
-          <h3
-            className="text-sm font-bold uppercase tracking-wider"
-            style={{ color: "#3d4f40" }}
-          >
-            Partidos recientes
-          </h3>
-          {otros.length === 0 ? (
-            <p className="text-sm" style={{ color: "#3d4f40" }}>
-              {hayActivo
-                ? "Solo está el partido activo. Cuando crees otro, el anterior aparece acá."
-                : "Acá vas a ver los partidos guardados para reactivarlos."}
-            </p>
-          ) : (
-            <div className="space-y-3">
-              {otros.map((m) => (
-                <MatchCard
-                  key={m.id}
-                  match={m}
-                  busy={busy}
-                  onActivate={() => handleActivate(m.id)}
-                />
-              ))}
-            </div>
-          )}
-          <button
-            type="button"
-            onClick={() => {
-              fetchPartido();
-              refreshLista();
-            }}
-            className="text-xs font-medium"
-            style={{ color: "#3d4f40" }}
-          >
-            Actualizar lista
-          </button>
-        </section>
+        {error && (
+          <p className="rounded-xl border-2 border-[#c43c2c] bg-white p-3 text-sm text-[#c43c2c]">
+            No se pudo cargar la lista: {error}
+          </p>
+        )}
+
+        {loading ? (
+          <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
+            {[0, 1, 2].map((i) => (
+              <div key={i} className="h-44 animate-pulse rounded-2xl bg-white/70" />
+            ))}
+          </div>
+        ) : visibles.length === 0 ? (
+          <div className="rounded-2xl border-2 border-dashed border-[#9aaf90] bg-white p-8 text-center text-[#3d4f40]">
+            {lista.length === 0 ? (
+              <>
+                <p className="mb-4">Todavía no hay partidos. Creá el primero para empezar.</p>
+                <Button onClick={() => navigate("/nuevo-partido")}>
+                  <Plus size={18} /> Crear partido
+                </Button>
+              </>
+            ) : busqueda || torneo ? (
+              <p>Ningún partido coincide con la búsqueda.</p>
+            ) : filtro === "en_curso" ? (
+              <p>No hay partidos en curso. Creá uno nuevo o mirá los finalizados.</p>
+            ) : (
+              <p>No hay partidos finalizados todavía.</p>
+            )}
+          </div>
+        ) : (
+          <div className="grid grid-cols-1 gap-3 sm:gap-4 md:grid-cols-2 xl:grid-cols-3">
+            {visibles.map((m) => (
+              <MatchCard
+                key={m.id}
+                match={m}
+                onScore={() => navigate(`/control/${m.id}`)}
+                onOpenTv={() => openTv(m)}
+                onShare={() => setShare(m)}
+              />
+            ))}
+          </div>
+        )}
       </div>
 
-      <ConfirmNewMatchModal
-        open={confirmOpen}
-        activeLabel={activeLabel}
-        onCancel={() => setConfirmOpen(false)}
-        onConfirm={confirmAndGoCreate}
-      />
+      {share && <ShareModal match={share} onClose={() => setShare(null)} />}
     </AppShell>
   );
 }

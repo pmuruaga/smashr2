@@ -1,40 +1,14 @@
-import { useCallback, useRef } from "react";
-import { api } from "../services/api.js";
+import { useCallback } from "react";
 
 const PUNTOS_GAME = [0, 15, 30, 40, "Ad"];
 
-export function useScoring(partido, actualizarEstado, onEstadoRemoto) {
-  const accionesRef = useRef([]);
-
-  const guardarHistorial = useCallback(() => {
-    if (partido) {
-      accionesRef.current.push(JSON.stringify(partido));
-    }
-  }, [partido]);
-
-  const deshacer = useCallback(async () => {
-    try {
-      const res = await api.deshacerAccion();
-      if (res?.data) {
-        if (accionesRef.current.length > 0) accionesRef.current.pop();
-        onEstadoRemoto?.(res.data);
-        return res.data;
-      }
-    } catch {
-      /* fallback local */
-    }
-    if (accionesRef.current.length < 1) return null;
-    const estadoAnterior = JSON.parse(accionesRef.current.pop());
-    await actualizarEstado(estadoAnterior);
-    return estadoAnterior;
-  }, [actualizarEstado, onEstadoRemoto]);
-
+/** `partidoRef.current` siempre tiene el último estado (incluido el optimista). */
+export function useScoring(partidoRef, actualizarEstado) {
   const sumarPunto = useCallback(
     (equipo) => {
+      const partido = partidoRef.current;
       if (!partido) return;
       if (partido.juego.equipoGanador !== "") return;
-
-      guardarHistorial();
 
       const datos = JSON.parse(JSON.stringify(partido));
       if (datos.calentamiento?.activo) {
@@ -97,17 +71,19 @@ export function useScoring(partido, actualizarEstado, onEstadoRemoto) {
           datos.puntos.game = [3, 3];
         }
 
+        const g = Number(datos.juego.gamesporset) || 6;
+
         if (
-          datos.puntos.sets[datos.puntos.set - 1][0] === 5 &&
-          datos.puntos.sets[datos.puntos.set - 1][1] === 5 &&
+          datos.puntos.sets[datos.puntos.set - 1][0] === g - 1 &&
+          datos.puntos.sets[datos.puntos.set - 1][1] === g - 1 &&
           !(datos.puntos.ultimoSetTieBreak && esUltimoSet)
         ) {
-          datos.puntos.ultimoGame = 7;
+          datos.puntos.ultimoGame = g + 1;
         }
 
         if (
-          datos.puntos.sets[datos.puntos.set - 1][0] === 6 &&
-          datos.puntos.sets[datos.puntos.set - 1][1] === 6 &&
+          datos.puntos.sets[datos.puntos.set - 1][0] === g &&
+          datos.puntos.sets[datos.puntos.set - 1][1] === g &&
           datos.puntos.game[0] === 0 &&
           datos.puntos.game[1] === 0
         ) {
@@ -142,18 +118,19 @@ export function useScoring(partido, actualizarEstado, onEstadoRemoto) {
           datos.puntos.ultimoGame =
             esUltimoSet && datos.puntos.ultimoSetTieBreak
               ? datos.puntos.ultimoGameSuperTB
-              : 6;
+              : g;
           juego_finalizado(datos);
         }
       }
 
       actualizarEstado(datos);
     },
-    [partido, actualizarEstado, guardarHistorial]
+    [partidoRef, actualizarEstado]
   );
 
   const establecerServ = useCallback(
     (jugadorIndex) => {
+      const partido = partidoRef.current;
       if (!partido) return;
       const datos = JSON.parse(JSON.stringify(partido));
       const orden = [...datos.juego.orden];
@@ -180,16 +157,10 @@ export function useScoring(partido, actualizarEstado, onEstadoRemoto) {
 
       actualizarEstado(datos);
     },
-    [partido, actualizarEstado]
+    [partidoRef, actualizarEstado]
   );
 
-  return {
-    sumarPunto,
-    establecerServ,
-    deshacer,
-    PUNTOS_GAME,
-    tieneHistorial: accionesRef.current.length > 0,
-  };
+  return { sumarPunto, establecerServ, PUNTOS_GAME };
 }
 
 function juego_finalizado(datos) {

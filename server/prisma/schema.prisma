@@ -9,6 +9,9 @@ datasource db {
 
 model Partido {
   id            Int       @id @default(autoincrement())
+  codigo        String?   @unique
+  torneo        String    @default("")
+  cancha        String    @default("")
   etapa         String    @default("Fase de Grupos")
   inicio        DateTime  @default(now())
   finalizado    Boolean   @default(false)
@@ -74,6 +77,7 @@ model EstadoPartido {
 
   pantallaActual String @default("")
   tiempoFinalMs  BigInt  @default(0)
+  version        Int     @default(0)
 
   updatedAt DateTime @updatedAt
 }

@@ -1,21 +1,31 @@
 import { useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { Navigate, useLocation, useNavigate } from "react-router-dom";
 import { useAuth } from "../context/AuthContext.jsx";
 import Button from "../components/Button.jsx";
 
 export default function Login() {
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
-  const { login } = useAuth();
+  const [sending, setSending] = useState(false);
+  const { login, isLoggedIn } = useAuth();
   const navigate = useNavigate();
+  const location = useLocation();
+  const destino = location.state?.from || "/";
 
-  const handleSubmit = (e) => {
+  if (isLoggedIn) return <Navigate to={destino} replace />;
+
+  const handleSubmit = async (e) => {
     e.preventDefault();
-    if (login(password)) {
-      navigate("/");
-    } else {
-      setError("Contraseña incorrecta");
+    setSending(true);
+    setError("");
+    try {
+      await login(password);
+      navigate(destino, { replace: true });
+    } catch (err) {
+      setError(err.status === 401 ? "Contraseña incorrecta" : `No se pudo ingresar: ${err.message}`);
       setPassword("");
+    } finally {
+      setSending(false);
     }
   };
 
@@ -66,8 +76,8 @@ export default function Login() {
           autoComplete="current-password"
           className="ui-field mb-5"
         />
-        <Button type="submit" className="w-full">
-          Entrar
+        <Button type="submit" className="w-full" disabled={sending || !password}>
+          {sending ? "Entrando…" : "Entrar"}
         </Button>
       </form>
     </div>

@@ -1,5 +1,12 @@
+import crypto from "crypto";
+import fs from "fs";
+import path from "path";
+import { fileURLToPath } from "url";
 import { prisma } from "../prismaClient.js";
-import { notifyAllClients } from "../routes/sseRoutes.js";
+import { notifyPartido, notifyLista } from "../routes/sseRoutes.js";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const uploadsDir = path.join(__dirname, "..", "..", "uploads");
 
 const partidoInclude = {
   equipo1: true,
@@ -8,25 +15,69 @@ const partidoInclude = {
   estado: true,
 };
 
-function estadoToJSON(estado, partido, equipo1, equipo2, config) {
+const CODIGO_ALPHABET = "abcdefghjkmnpqrstuvwxyz23456789";
+
+function nuevoCodigo(len = 7) {
+  let out = "";
+  for (let i = 0; i < len; i++) {
+    out += CODIGO_ALPHABET[crypto.randomInt(CODIGO_ALPHABET.length)];
+  }
+  return out;
+}
+
+async function codigoLibre() {
+  for (let i = 0; i < 10; i++) {
+    const codigo = nuevoCodigo();
+    const exists = await prisma.partido.findUnique({ where: { codigo }, select: { id: true } });
+    if (!exists) return codigo;
+  }
+  return nuevoCodigo(10);
+}
+
+/** Partidos creados antes de los links compartibles no tienen código. */
+export async function ensureCodigos() {
+  const sinCodigo = await prisma.partido.findMany({
+    where: { codigo: null },
+    select: { id: true },
+  });
+  for (const p of sinCodigo) {
+    await prisma.partido.update({ where: { id: p.id }, data: { codigo: await codigoLibre() } });
+  }
+  if (sinCodigo.length) console.log(`Códigos generados para ${sinCodigo.length} partidos`);
+}
+
+function parseJSON(raw, fallback) {
+  try {
+    return raw ? JSON.parse(raw) : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function equipoJSON(eq, defColor) {
+  return {
+    jugador1: eq?.jugador1 || "",
+    jugador2: eq?.jugador2 || "",
+    color: eq?.color || defColor,
+  };
+}
+
+function estadoToJSON(partido) {
   if (!partido) return null;
+  const estado = partido.estado;
+  const config = partido.configuracion;
   return {
     id: partido.id,
-    activo: Boolean(partido.activo),
+    codigo: partido.codigo,
+    torneo: partido.torneo || "",
+    cancha: partido.cancha || "",
+    version: estado?.version ?? 0,
     finalizado: Boolean(partido.finalizado),
-    equipo1: {
-      jugador1: equipo1?.jugador1 || "",
-      jugador2: equipo1?.jugador2 || "",
-      color: equipo1?.color || "#17A2B8",
-    },
-    equipo2: {
-      jugador1: equipo2?.jugador1 || "",
-      jugador2: equipo2?.jugador2 || "",
-      color: equipo2?.color || "#28A745",
-    },
+    equipo1: equipoJSON(partido.equipo1, "#17A2B8"),
+    equipo2: equipoJSON(partido.equipo2, "#28A745"),
     puntos: {
       game: [estado?.gameEquipo1 || 0, estado?.gameEquipo2 || 0],
-      sets: estado?.setsJSON ? JSON.parse(estado.setsJSON) : [[0, 0], [0, 0], [0, 0]],
+      sets: parseJSON(estado?.setsJSON, [[0, 0], [0, 0], [0, 0]]),
       set: estado?.setActual || 1,
       ultimoPunto: estado?.ultimoPunto || 4,
       ultimoGame: estado?.ultimoGame || 6,
@@ -37,14 +88,14 @@ function estadoToJSON(estado, partido, equipo1, equipo2, config) {
     },
     juego: {
       servicio: estado?.servicioActual || 0,
-      orden: estado?.ordenServicios ? JSON.parse(estado.ordenServicios) : [0, 2, 1, 3],
+      orden: parseJSON(estado?.ordenServicios, [0, 2, 1, 3]),
       posServ: estado?.posicionServicio || 0,
       tiebreak: estado?.tiebreak || false,
-      equipoGanador: partido?.equipoGanador || "",
-      inicio: partido?.inicio ? new Date(partido.inicio).getTime() : Date.now(),
+      equipoGanador: partido.equipoGanador || "",
+      inicio: partido.inicio ? new Date(partido.inicio).getTime() : Date.now(),
       cantidadSets: String(config?.cantidadSets || 3),
       gamesporset: config?.gamesPorSet || 6,
-      etapa: partido?.etapa || "Fase de Grupos",
+      etapa: partido.etapa || "",
       tiempoTranscurridoAlFinalizar: Number(estado?.tiempoFinalMs || 0) || null,
     },
     calentamiento: {
@@ -60,43 +111,11 @@ function estadoToJSON(estado, partido, equipo1, equipo2, config) {
   };
 }
 
-async function findActivoPartido(extraInclude = {}) {
-  let partido = await prisma.partido.findFirst({
-    where: { activo: true },
-    include: { ...partidoInclude, ...extraInclude },
-  });
-  if (partido) return partido;
-
-  // Migración / datos viejos: activar el más reciente
-  partido = await prisma.partido.findFirst({
-    orderBy: { createdAt: "desc" },
-    include: { ...partidoInclude, ...extraInclude },
-  });
-  if (partido && !partido.activo) {
-    await prisma.partido.updateMany({ data: { activo: false } });
-    await prisma.partido.update({
-      where: { id: partido.id },
-      data: { activo: true },
-    });
-    partido = await prisma.partido.findFirst({
-      where: { id: partido.id },
-      include: { ...partidoInclude, ...extraInclude },
-    });
-  }
-  return partido;
-}
-
 function resumenPartido(p) {
-  let sets = [[0, 0]];
-  try {
-    sets = p.estado?.setsJSON ? JSON.parse(p.estado.setsJSON) : [[0, 0]];
-  } catch {
-    /* ignore */
-  }
+  const now = Date.now();
   const calentamiento =
-    p.estado?.calentamientoActivo && Number(p.estado.calentamientoFin || 0) > Date.now();
-  const descanso =
-    p.estado?.descansoActivo && Number(p.estado.descansoFin || 0) > Date.now();
+    p.estado?.calentamientoActivo && Number(p.estado.calentamientoFin || 0) > now;
+  const descanso = p.estado?.descansoActivo && Number(p.estado.descansoFin || 0) > now;
 
   let status = "en_juego";
   if (p.finalizado) status = "finalizado";
@@ -105,139 +124,123 @@ function resumenPartido(p) {
 
   return {
     id: p.id,
+    codigo: p.codigo,
+    torneo: p.torneo || "",
+    cancha: p.cancha || "",
     etapa: p.etapa,
-    activo: p.activo,
     finalizado: p.finalizado,
     status,
     inicio: p.inicio,
     updatedAt: p.updatedAt,
-    equipo1: {
-      jugador1: p.equipo1?.jugador1 || "",
-      jugador2: p.equipo1?.jugador2 || "",
-      color: p.equipo1?.color || "#17A2B8",
-    },
-    equipo2: {
-      jugador1: p.equipo2?.jugador1 || "",
-      jugador2: p.equipo2?.jugador2 || "",
-      color: p.equipo2?.color || "#28A745",
-    },
-    sets,
+    equipo1: equipoJSON(p.equipo1, "#17A2B8"),
+    equipo2: equipoJSON(p.equipo2, "#28A745"),
+    sets: parseJSON(p.estado?.setsJSON, [[0, 0]]),
+    set: p.estado?.setActual || 1,
     game: [p.estado?.gameEquipo1 || 0, p.estado?.gameEquipo2 || 0],
+    tiebreak: Boolean(p.estado?.tiebreak),
     equipoGanador: p.equipoGanador || "",
   };
 }
 
-export async function getPartidoActual(req, res) {
+function parseId(req) {
+  const id = parseInt(req.params.id, 10);
+  return Number.isFinite(id) ? id : null;
+}
+
+async function loadPartido(id) {
+  return prisma.partido.findUnique({ where: { id }, include: partidoInclude });
+}
+
+/** Avisa al tablero/controles del partido y a los paneles de gestión. */
+async function broadcast(id) {
+  const partido = await loadPartido(id);
+  if (!partido) return null;
+  const data = estadoToJSON(partido);
+  notifyPartido(id, { type: "estado", data });
+  notifyLista({ type: "partido", data: resumenPartido(partido) });
+  return data;
+}
+
+function sendError(res, error, where) {
+  console.error(`Error ${where}:`, error);
+  res.status(500).json({ status: "error", message: error.message });
+}
+
+function notFound(res) {
+  return res.status(404).json({ status: "error", message: "Partido no encontrado" });
+}
+
+export async function getTableroPublico(req, res) {
   try {
-    const partido = await findActivoPartido();
-    if (!partido) {
-      return res.json({ status: "ok", data: null });
-    }
-    const data = estadoToJSON(
-      partido.estado,
-      partido,
-      partido.equipo1,
-      partido.equipo2,
-      partido.configuracion
-    );
-    res.json({ status: "ok", data });
+    const partido = await prisma.partido.findUnique({
+      where: { codigo: String(req.params.codigo) },
+      include: partidoInclude,
+    });
+    if (!partido) return notFound(res);
+    res.json({ status: "ok", data: estadoToJSON(partido) });
   } catch (error) {
-    console.error("Error getPartidoActual:", error);
-    res.status(500).json({ status: "error", message: error.message });
+    sendError(res, error, "getTableroPublico");
+  }
+}
+
+export async function getPartido(req, res) {
+  try {
+    const id = parseId(req);
+    const partido = id ? await loadPartido(id) : null;
+    if (!partido) return notFound(res);
+    res.json({ status: "ok", data: estadoToJSON(partido) });
+  } catch (error) {
+    sendError(res, error, "getPartido");
   }
 }
 
 export async function listarPartidos(req, res) {
   try {
+    const filtro = String(req.query.estado || "todos");
+    const where =
+      filtro === "en_curso"
+        ? { finalizado: false }
+        : filtro === "finalizados"
+          ? { finalizado: true }
+          : {};
     const partidos = await prisma.partido.findMany({
+      where,
       orderBy: { updatedAt: "desc" },
-      take: 40,
-      include: {
-        equipo1: true,
-        equipo2: true,
-        estado: true,
-      },
+      take: 100,
+      include: { equipo1: true, equipo2: true, estado: true },
     });
     res.json({ status: "ok", data: partidos.map(resumenPartido) });
   } catch (error) {
-    console.error("Error listarPartidos:", error);
-    res.status(500).json({ status: "error", message: error.message });
-  }
-}
-
-export async function activarPartido(req, res) {
-  try {
-    const id = parseInt(req.params.id, 10);
-    if (!Number.isFinite(id)) {
-      return res.status(400).json({ status: "error", message: "ID inválido" });
-    }
-
-    const exists = await prisma.partido.findUnique({ where: { id } });
-    if (!exists) {
-      return res.status(404).json({ status: "error", message: "Partido no encontrado" });
-    }
-
-    await prisma.partido.updateMany({ data: { activo: false } });
-    await prisma.partido.update({ where: { id }, data: { activo: true } });
-
-    const partido = await prisma.partido.findFirst({
-      where: { id },
-      include: partidoInclude,
-    });
-    const data = estadoToJSON(
-      partido.estado,
-      partido,
-      partido.equipo1,
-      partido.equipo2,
-      partido.configuracion
-    );
-    notifyAllClients({ type: "partido-creado", data });
-    res.json({ status: "ok", data });
-  } catch (error) {
-    console.error("Error activarPartido:", error);
-    res.status(500).json({ status: "error", message: error.message });
+    sendError(res, error, "listarPartidos");
   }
 }
 
 export async function crearPartido(req, res) {
   try {
-    const { equipo1, equipo2, configuracion, etapa } = req.body;
+    const { equipo1, equipo2, configuracion, etapa, torneo, cancha } = req.body || {};
 
-    const cantidadSets = configuracion?.cantidadSets || 3;
-    const gamesPorSet = configuracion?.gamesPorSet || 6;
+    const cantidadSets = Math.min(Math.max(parseInt(configuracion?.cantidadSets, 10) || 3, 1), 5);
+    const gamesPorSet = parseInt(configuracion?.gamesPorSet, 10) || 6;
     const setsArray = Array.from({ length: cantidadSets }, () => [0, 0]);
 
-    const eq1 = await prisma.equipo.create({
-      data: {
-        jugador1: equipo1?.jugador1 || "",
-        jugador2: equipo1?.jugador2 || "",
-        color: equipo1?.color || "#17A2B8",
-      },
-    });
-
-    const eq2 = await prisma.equipo.create({
-      data: {
-        jugador1: equipo2?.jugador1 || "",
-        jugador2: equipo2?.jugador2 || "",
-        color: equipo2?.color || "#28A745",
-      },
-    });
-
-    await prisma.partido.updateMany({ data: { activo: false } });
+    const eq1 = await prisma.equipo.create({ data: equipoJSON(equipo1, "#17A2B8") });
+    const eq2 = await prisma.equipo.create({ data: equipoJSON(equipo2, "#28A745") });
 
     const partido = await prisma.partido.create({
       data: {
-        etapa: etapa || "Fase de Grupos",
-        activo: true,
+        codigo: await codigoLibre(),
+        torneo: String(torneo || "").slice(0, 80),
+        cancha: String(cancha || "").slice(0, 40),
+        etapa: String(etapa || "").slice(0, 60),
         equipo1Id: eq1.id,
         equipo2Id: eq2.id,
         configuracion: {
           create: {
             cantidadSets,
             gamesPorSet,
-            puntoOro: configuracion?.puntoOro || false,
+            puntoOro: Boolean(configuracion?.puntoOro),
             ultimoPuntoTieBreak: configuracion?.ultimoPuntoTieBreak || 100,
-            ultimoSetTieBreak: configuracion?.ultimoSetTieBreak || false,
+            ultimoSetTieBreak: Boolean(configuracion?.ultimoSetTieBreak),
             ultimoGameSuperTB: configuracion?.ultimoGameSuperTB || 100,
           },
         },
@@ -251,295 +254,307 @@ export async function crearPartido(req, res) {
       include: partidoInclude,
     });
 
-    const data = estadoToJSON(
-      partido.estado,
-      partido,
-      partido.equipo1,
-      partido.equipo2,
-      partido.configuracion
-    );
-    notifyAllClients({ type: "partido-creado", data });
-    res.json({ status: "ok", data });
+    notifyLista({ type: "partido", data: resumenPartido(partido) });
+    res.json({ status: "ok", data: estadoToJSON(partido) });
   } catch (error) {
-    console.error("Error crearPartido:", error);
-    res.status(500).json({ status: "error", message: error.message });
+    sendError(res, error, "crearPartido");
   }
+}
+
+/** Datos del partido que no son el marcador: torneo, cancha, instancia, nombres. */
+export async function editarPartido(req, res) {
+  try {
+    const id = parseId(req);
+    const partido = id ? await loadPartido(id) : null;
+    if (!partido) return notFound(res);
+
+    const { torneo, cancha, etapa, equipo1, equipo2 } = req.body || {};
+    const data = {};
+    if (torneo !== undefined) data.torneo = String(torneo).slice(0, 80);
+    if (cancha !== undefined) data.cancha = String(cancha).slice(0, 40);
+    if (etapa !== undefined) data.etapa = String(etapa).slice(0, 60);
+    if (Object.keys(data).length) {
+      await prisma.partido.update({ where: { id }, data });
+    }
+    if (equipo1) {
+      await prisma.equipo.update({
+        where: { id: partido.equipo1Id },
+        data: equipoJSON({ ...partido.equipo1, ...equipo1 }, "#17A2B8"),
+      });
+    }
+    if (equipo2) {
+      await prisma.equipo.update({
+        where: { id: partido.equipo2Id },
+        data: equipoJSON({ ...partido.equipo2, ...equipo2 }, "#28A745"),
+      });
+    }
+    await prisma.estadoPartido.update({
+      where: { partidoId: id },
+      data: { version: { increment: 1 } },
+    });
+
+    res.json({ status: "ok", data: await broadcast(id) });
+  } catch (error) {
+    sendError(res, error, "editarPartido");
+  }
+}
+
+export async function eliminarPartido(req, res) {
+  try {
+    const id = parseId(req);
+    const partido = id ? await loadPartido(id) : null;
+    if (!partido) return notFound(res);
+
+    await prisma.partido.delete({ where: { id } });
+    await prisma.equipo.deleteMany({ where: { id: { in: [partido.equipo1Id, partido.equipo2Id] } } });
+    removeUploadIfUnused(partido.estado?.pantallaActual);
+
+    notifyPartido(id, { type: "eliminado", data: { id } });
+    notifyLista({ type: "eliminado", data: { id } });
+    res.json({ status: "ok" });
+  } catch (error) {
+    sendError(res, error, "eliminarPartido");
+  }
+}
+
+function conflict(res, partido) {
+  return res.status(409).json({
+    status: "conflict",
+    message: "Otro dispositivo actualizó este partido. Se cargó el marcador actual.",
+    data: estadoToJSON(partido),
+  });
 }
 
 export async function actualizarEstado(req, res) {
   try {
-    const estadoData = req.body;
-    const partido = await findActivoPartido();
+    const id = parseId(req);
+    const partido = id ? await loadPartido(id) : null;
+    if (!partido) return notFound(res);
 
-    if (!partido) {
-      return res.status(404).json({ status: "error", message: "No hay partido activo" });
-    }
+    const estadoData = req.body || {};
+    const actual = partido.estado;
+    const baseVersion = Number.isInteger(estadoData.version) ? estadoData.version : actual.version;
 
-    const snapshot = estadoToJSON(
-      partido.estado,
-      partido,
-      partido.equipo1,
-      partido.equipo2,
-      partido.configuracion
-    );
-    await prisma.historialAccion.create({
+    const result = await prisma.estadoPartido.updateMany({
+      where: { partidoId: id, version: baseVersion },
       data: {
-        partidoId: partido.id,
-        estadoJSON: JSON.stringify(snapshot),
-      },
-    });
-    const extras = await prisma.historialAccion.findMany({
-      where: { partidoId: partido.id },
-      orderBy: { timestamp: "desc" },
-      skip: 50,
-    });
-    if (extras.length) {
-      await prisma.historialAccion.deleteMany({
-        where: { id: { in: extras.map((e) => e.id) } },
-      });
-    }
-
-    const setsJSON = estadoData.puntos?.sets
-      ? JSON.stringify(estadoData.puntos.sets)
-      : partido.estado.setsJSON;
-
-    await prisma.estadoPartido.update({
-      where: { partidoId: partido.id },
-      data: {
-        gameEquipo1: estadoData.puntos?.game?.[0] ?? partido.estado.gameEquipo1,
-        gameEquipo2: estadoData.puntos?.game?.[1] ?? partido.estado.gameEquipo2,
-        setsJSON,
-        setActual: estadoData.puntos?.set ?? partido.estado.setActual,
-        ultimoPunto: estadoData.puntos?.ultimoPunto ?? partido.estado.ultimoPunto,
-        ultimoGame: estadoData.puntos?.ultimoGame ?? partido.estado.ultimoGame,
-        servicioActual: estadoData.juego?.servicio ?? partido.estado.servicioActual,
+        gameEquipo1: estadoData.puntos?.game?.[0] ?? actual.gameEquipo1,
+        gameEquipo2: estadoData.puntos?.game?.[1] ?? actual.gameEquipo2,
+        setsJSON: estadoData.puntos?.sets
+          ? JSON.stringify(estadoData.puntos.sets)
+          : actual.setsJSON,
+        setActual: estadoData.puntos?.set ?? actual.setActual,
+        ultimoPunto: estadoData.puntos?.ultimoPunto ?? actual.ultimoPunto,
+        ultimoGame: estadoData.puntos?.ultimoGame ?? actual.ultimoGame,
+        servicioActual: estadoData.juego?.servicio ?? actual.servicioActual,
         ordenServicios: estadoData.juego?.orden
           ? JSON.stringify(estadoData.juego.orden)
-          : partido.estado.ordenServicios,
-        posicionServicio: estadoData.juego?.posServ ?? partido.estado.posicionServicio,
-        tiebreak: estadoData.juego?.tiebreak ?? partido.estado.tiebreak,
-        pantallaActual: partido.estado.pantallaActual,
-        calentamientoActivo:
-          estadoData.calentamiento?.activo ?? partido.estado.calentamientoActivo,
+          : actual.ordenServicios,
+        posicionServicio: estadoData.juego?.posServ ?? actual.posicionServicio,
+        tiebreak: estadoData.juego?.tiebreak ?? actual.tiebreak,
+        calentamientoActivo: estadoData.calentamiento?.activo ?? actual.calentamientoActivo,
         calentamientoFin:
           estadoData.calentamiento?.fin != null
             ? BigInt(estadoData.calentamiento.fin)
-            : partido.estado.calentamientoFin,
-        descansoActivo: estadoData.descanso?.activo ?? partido.estado.descansoActivo,
-        descansoSegundos:
-          estadoData.descanso?.segundos ?? partido.estado.descansoSegundos,
+            : actual.calentamientoFin,
+        descansoActivo: estadoData.descanso?.activo ?? actual.descansoActivo,
+        descansoSegundos: estadoData.descanso?.segundos ?? actual.descansoSegundos,
         descansoFin:
-          estadoData.descanso?.fin != null
-            ? BigInt(estadoData.descanso.fin)
-            : partido.estado.descansoFin,
+          estadoData.descanso?.fin != null ? BigInt(estadoData.descanso.fin) : actual.descansoFin,
         tiempoFinalMs:
           estadoData.juego?.tiempoTranscurridoAlFinalizar != null
             ? BigInt(estadoData.juego.tiempoTranscurridoAlFinalizar)
-            : partido.estado.tiempoFinalMs,
+            : actual.tiempoFinalMs,
+        version: { increment: 1 },
       },
     });
 
+    if (result.count === 0) {
+      return conflict(res, await loadPartido(id));
+    }
+
+    await prisma.historialAccion.create({
+      data: { partidoId: id, estadoJSON: JSON.stringify(estadoToJSON(partido)) },
+    });
+    const extras = await prisma.historialAccion.findMany({
+      where: { partidoId: id },
+      orderBy: { timestamp: "desc" },
+      skip: 80,
+      select: { id: true },
+    });
+    if (extras.length) {
+      await prisma.historialAccion.deleteMany({ where: { id: { in: extras.map((e) => e.id) } } });
+    }
+
+    const partidoData = {};
     if (estadoData.juego?.equipoGanador !== undefined) {
-      await prisma.partido.update({
-        where: { id: partido.id },
-        data: {
-          equipoGanador: estadoData.juego.equipoGanador,
-          finalizado: estadoData.juego.equipoGanador !== "",
-        },
-      });
+      partidoData.equipoGanador = estadoData.juego.equipoGanador;
+      partidoData.finalizado = estadoData.juego.equipoGanador !== "";
     }
+    // Toca updatedAt para que el partido suba en la lista de gestión
+    await prisma.partido.update({ where: { id }, data: partidoData });
 
-    if (estadoData.equipo1) {
-      await prisma.equipo.update({
-        where: { id: partido.equipo1Id },
-        data: {
-          jugador1: estadoData.equipo1.jugador1,
-          jugador2: estadoData.equipo1.jugador2,
-          color: estadoData.equipo1.color,
-        },
-      });
-    }
-    if (estadoData.equipo2) {
-      await prisma.equipo.update({
-        where: { id: partido.equipo2Id },
-        data: {
-          jugador1: estadoData.equipo2.jugador1,
-          jugador2: estadoData.equipo2.jugador2,
-          color: estadoData.equipo2.color,
-        },
-      });
-    }
-
-    const updatedPartido = await findActivoPartido();
-    const data = estadoToJSON(
-      updatedPartido.estado,
-      updatedPartido,
-      updatedPartido.equipo1,
-      updatedPartido.equipo2,
-      updatedPartido.configuracion
-    );
-    notifyAllClients({ type: "estado-actualizado", data });
-    res.json({ status: "ok", data });
+    res.json({ status: "ok", data: await broadcast(id) });
   } catch (error) {
-    console.error("Error actualizarEstado:", error);
-    res.status(500).json({ status: "error", message: error.message });
+    sendError(res, error, "actualizarEstado");
   }
 }
 
 export async function deshacerAccion(req, res) {
   try {
-    const partido = await findActivoPartido({
-      historial: { orderBy: { timestamp: "desc" }, take: 1 },
-    });
+    const id = parseId(req);
+    const partido = id
+      ? await prisma.partido.findUnique({
+          where: { id },
+          include: { ...partidoInclude, historial: { orderBy: { id: "desc" }, take: 1 } },
+        })
+      : null;
+    if (!partido) return notFound(res);
 
-    if (!partido || !partido.historial?.length) {
+    if (!partido.historial?.length) {
       return res.json({
         status: "ok",
         message: "No hay acciones para deshacer",
-        data: null,
+        data: estadoToJSON(partido),
       });
     }
 
     const ultimaAccion = partido.historial[0];
-    const estadoPrevio = JSON.parse(ultimaAccion.estadoJSON);
+    const previo = JSON.parse(ultimaAccion.estadoJSON);
     await prisma.historialAccion.delete({ where: { id: ultimaAccion.id } });
 
-    const setsJSON = estadoPrevio.puntos?.sets
-      ? JSON.stringify(estadoPrevio.puntos.sets)
-      : partido.estado.setsJSON;
-
     await prisma.estadoPartido.update({
-      where: { partidoId: partido.id },
+      where: { partidoId: id },
       data: {
-        gameEquipo1: estadoPrevio.puntos?.game?.[0] ?? 0,
-        gameEquipo2: estadoPrevio.puntos?.game?.[1] ?? 0,
-        setsJSON,
-        setActual: estadoPrevio.puntos?.set ?? 1,
-        ultimoPunto: estadoPrevio.puntos?.ultimoPunto ?? 4,
-        ultimoGame: estadoPrevio.puntos?.ultimoGame ?? 6,
-        servicioActual: estadoPrevio.juego?.servicio ?? 0,
-        ordenServicios: estadoPrevio.juego?.orden
-          ? JSON.stringify(estadoPrevio.juego.orden)
-          : "[0,2,1,3]",
-        posicionServicio: estadoPrevio.juego?.posServ ?? 0,
-        tiebreak: estadoPrevio.juego?.tiebreak ?? false,
-        calentamientoActivo: estadoPrevio.calentamiento?.activo ?? false,
-        calentamientoFin: BigInt(estadoPrevio.calentamiento?.fin || 0),
-        descansoActivo: estadoPrevio.descanso?.activo ?? false,
-        descansoSegundos: estadoPrevio.descanso?.segundos ?? 0,
-        descansoFin: BigInt(estadoPrevio.descanso?.fin || 0),
-        tiempoFinalMs: BigInt(estadoPrevio.juego?.tiempoTranscurridoAlFinalizar || 0),
-        pantallaActual: estadoPrevio.pantalla_actual ?? partido.estado.pantallaActual,
+        gameEquipo1: previo.puntos?.game?.[0] ?? 0,
+        gameEquipo2: previo.puntos?.game?.[1] ?? 0,
+        setsJSON: previo.puntos?.sets
+          ? JSON.stringify(previo.puntos.sets)
+          : partido.estado.setsJSON,
+        setActual: previo.puntos?.set ?? 1,
+        ultimoPunto: previo.puntos?.ultimoPunto ?? 4,
+        ultimoGame: previo.puntos?.ultimoGame ?? 6,
+        servicioActual: previo.juego?.servicio ?? 0,
+        ordenServicios: previo.juego?.orden ? JSON.stringify(previo.juego.orden) : "[0,2,1,3]",
+        posicionServicio: previo.juego?.posServ ?? 0,
+        tiebreak: previo.juego?.tiebreak ?? false,
+        calentamientoActivo: previo.calentamiento?.activo ?? false,
+        calentamientoFin: BigInt(previo.calentamiento?.fin || 0),
+        descansoActivo: previo.descanso?.activo ?? false,
+        descansoSegundos: previo.descanso?.segundos ?? 0,
+        descansoFin: BigInt(previo.descanso?.fin || 0),
+        tiempoFinalMs: BigInt(previo.juego?.tiempoTranscurridoAlFinalizar || 0),
+        version: { increment: 1 },
       },
     });
 
     await prisma.partido.update({
-      where: { id: partido.id },
+      where: { id },
       data: {
-        equipoGanador: estadoPrevio.juego?.equipoGanador || "",
-        finalizado: !!estadoPrevio.juego?.equipoGanador,
+        equipoGanador: previo.juego?.equipoGanador || "",
+        finalizado: Boolean(previo.juego?.equipoGanador),
       },
     });
 
-    const updatedPartido = await findActivoPartido();
-    const data = estadoToJSON(
-      updatedPartido.estado,
-      updatedPartido,
-      updatedPartido.equipo1,
-      updatedPartido.equipo2,
-      updatedPartido.configuracion
-    );
-
-    notifyAllClients({ type: "estado-actualizado", data });
-    res.json({ status: "ok", data });
+    res.json({ status: "ok", data: await broadcast(id) });
   } catch (error) {
-    console.error("Error deshacerAccion:", error);
-    res.status(500).json({ status: "error", message: error.message });
+    sendError(res, error, "deshacerAccion");
   }
 }
 
 export async function getHistorial(req, res) {
   try {
-    const partido = await findActivoPartido({
-      historial: { orderBy: { timestamp: "desc" } },
+    const id = parseId(req);
+    if (!id) return notFound(res);
+    const historial = await prisma.historialAccion.findMany({
+      where: { partidoId: id },
+      orderBy: { id: "desc" },
     });
-
-    if (!partido) return res.json({ status: "ok", data: [] });
-
-    res.json({ status: "ok", data: partido.historial });
+    res.json({ status: "ok", data: historial });
   } catch (error) {
-    res.status(500).json({ status: "error", message: error.message });
+    sendError(res, error, "getHistorial");
   }
 }
 
-export async function setCalentamiento(req, res) {
+async function patchEstado(req, res, data, where) {
   try {
-    const { activo, fin } = req.body;
-    const partido = await findActivoPartido();
-
-    if (!partido) return res.status(404).json({ status: "error", message: "No hay partido" });
-
+    const id = parseId(req);
+    const exists = id
+      ? await prisma.estadoPartido.findUnique({ where: { partidoId: id }, select: { id: true } })
+      : null;
+    if (!exists) return notFound(res);
     await prisma.estadoPartido.update({
-      where: { partidoId: partido.id },
-      data: {
-        calentamientoActivo: activo,
-        calentamientoFin: BigInt(fin || 0),
-      },
+      where: { partidoId: id },
+      data: { ...data, version: { increment: 1 } },
     });
-
-    notifyAllClients({ type: "calentamiento", data: { activo, fin } });
-    res.json({ status: "ok" });
+    res.json({ status: "ok", data: await broadcast(id) });
   } catch (error) {
-    res.status(500).json({ status: "error", message: error.message });
+    sendError(res, error, where);
   }
 }
 
-export async function setDescanso(req, res) {
-  try {
-    const { activo, segundos, fin } = req.body;
-    const partido = await findActivoPartido();
-
-    if (!partido) return res.status(404).json({ status: "error", message: "No hay partido" });
-
-    await prisma.estadoPartido.update({
-      where: { partidoId: partido.id },
-      data: {
-        descansoActivo: activo,
-        descansoSegundos: segundos || 0,
-        descansoFin: BigInt(fin || 0),
-      },
-    });
-
-    notifyAllClients({ type: "descanso", data: { activo, segundos, fin } });
-    res.json({ status: "ok" });
-  } catch (error) {
-    res.status(500).json({ status: "error", message: error.message });
-  }
+export function setCalentamiento(req, res) {
+  const { activo, fin } = req.body || {};
+  return patchEstado(
+    req,
+    res,
+    { calentamientoActivo: Boolean(activo), calentamientoFin: BigInt(fin || 0) },
+    "setCalentamiento"
+  );
 }
 
-export async function applyPantallaUrl(pantalla) {
-  const partido = await findActivoPartido();
-  if (!partido) return { ok: false, error: "No hay partido" };
+export function setDescanso(req, res) {
+  const { activo, segundos, fin } = req.body || {};
+  return patchEstado(
+    req,
+    res,
+    {
+      descansoActivo: Boolean(activo),
+      descansoSegundos: Number(segundos) || 0,
+      descansoFin: BigInt(fin || 0),
+    },
+    "setDescanso"
+  );
+}
+
+function removeUploadIfUnused(url) {
+  if (!url || !url.startsWith("/uploads/pantalla-")) return;
+  const filename = path.basename(url.split("?")[0]);
+  prisma.estadoPartido
+    .count({ where: { pantallaActual: { contains: filename } } })
+    .then((enUso) => {
+      if (enUso > 0) return;
+      const full = path.join(uploadsDir, filename);
+      if (full.startsWith(uploadsDir) && fs.existsSync(full)) fs.unlinkSync(full);
+    })
+    .catch(() => {});
+}
+
+export async function applyPantallaUrl(id, pantalla) {
+  const estado = await prisma.estadoPartido.findUnique({ where: { partidoId: id } });
+  if (!estado) return { ok: false, error: "Partido no encontrado" };
 
   await prisma.estadoPartido.update({
-    where: { partidoId: partido.id },
-    data: { pantallaActual: pantalla ?? "" },
+    where: { partidoId: id },
+    data: { pantallaActual: pantalla ?? "", version: { increment: 1 } },
   });
-
-  notifyAllClients({ type: "pantalla", data: { pantalla: pantalla ?? "" } });
-  return { ok: true };
+  if (estado.pantallaActual && estado.pantallaActual !== pantalla) {
+    removeUploadIfUnused(estado.pantallaActual);
+  }
+  const data = await broadcast(id);
+  return { ok: true, data };
 }
 
 export async function setPantalla(req, res) {
   try {
-    const { pantalla } = req.body;
-    const result = await applyPantallaUrl(pantalla ?? "");
-    if (!result.ok) {
-      return res.status(404).json({ status: "error", message: result.error });
-    }
-    res.json({ status: "ok", url: pantalla ?? "" });
+    const id = parseId(req);
+    if (!id) return notFound(res);
+    const pantalla = String(req.body?.pantalla ?? "");
+    const result = await applyPantallaUrl(id, pantalla);
+    if (!result.ok) return res.status(404).json({ status: "error", message: result.error });
+    res.json({ status: "ok", url: pantalla, data: result.data });
   } catch (error) {
-    res.status(500).json({ status: "error", message: error.message });
+    sendError(res, error, "setPantalla");
   }
 }
 

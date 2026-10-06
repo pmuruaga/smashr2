@@ -1,409 +1,324 @@
-import { useState, useEffect, useRef, useLayoutEffect } from "react";
-import { usePartido } from "../context/PartidoContext.jsx";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useParams } from "react-router-dom";
+import { Maximize, Minimize } from "lucide-react";
+import { usePartidoLive } from "../hooks/usePartidoLive.js";
 import BannerCarousel from "../components/BannerCarousel.jsx";
 import MediaRotator from "../components/MediaRotator.jsx";
 
 const PUNTOS_GAME = [0, 15, 30, 40, "Ad"];
-const DEFAULT_BOARD_BG = "/assets/score_pantalla-1.jpg";
 
-export default function Tablero() {
-  const { partido, loading } = usePartido();
-  const [tiempoTranscurrido, setTiempoTranscurrido] = useState("00:00:00");
-  const [mostrarCalentamiento, setMostrarCalentamiento] = useState(false);
-  const [mostrarDescanso, setMostrarDescanso] = useState(false);
-  const [relojCalentamiento, setRelojCalentamiento] = useState("05:00");
-  const [relojDescanso, setRelojDescanso] = useState("00:00");
+function useNow(ms = 500) {
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), ms);
+    return () => clearInterval(t);
+  }, [ms]);
+  return now;
+}
+
+/** Evita que el celular/tablet apague la pantalla mientras se mira el partido. */
+function useWakeLock() {
+  useEffect(() => {
+    let lock = null;
+    const request = async () => {
+      try {
+        if (document.visibilityState === "visible" && navigator.wakeLock) {
+          lock = await navigator.wakeLock.request("screen");
+        }
+      } catch {
+        /* no soportado o denegado */
+      }
+    };
+    request();
+    document.addEventListener("visibilitychange", request);
+    return () => {
+      document.removeEventListener("visibilitychange", request);
+      lock?.release?.().catch(() => {});
+    };
+  }, []);
+}
+
+function FullscreenButton() {
+  const [visible, setVisible] = useState(true);
+  const [isFs, setIsFs] = useState(Boolean(document.fullscreenElement));
 
   useEffect(() => {
-    const interval = setInterval(() => {
-      if (partido?.juego?.inicio) {
-        if (partido.juego.equipoGanador === "") {
-          setTiempoTranscurrido(msToTime(Date.now() - partido.juego.inicio));
-        } else if (partido.juego.tiempoTranscurridoAlFinalizar != null) {
-          setTiempoTranscurrido(
-            msToTime(partido.juego.tiempoTranscurridoAlFinalizar)
-          );
-        }
-      }
+    let t = setTimeout(() => setVisible(false), 3500);
+    const show = () => {
+      setVisible(true);
+      clearTimeout(t);
+      t = setTimeout(() => setVisible(false), 3500);
+    };
+    const onFs = () => setIsFs(Boolean(document.fullscreenElement));
+    window.addEventListener("mousemove", show);
+    window.addEventListener("touchstart", show);
+    document.addEventListener("fullscreenchange", onFs);
+    return () => {
+      clearTimeout(t);
+      window.removeEventListener("mousemove", show);
+      window.removeEventListener("touchstart", show);
+      document.removeEventListener("fullscreenchange", onFs);
+    };
+  }, []);
 
-      if (partido?.calentamiento?.activo && partido.calentamiento.fin > Date.now()) {
-        const diff = Math.max(0, partido.calentamiento.fin - Date.now());
-        setMostrarCalentamiento(true);
-        const totalSeg = Math.floor(diff / 1000);
-        const min = Math.floor(totalSeg / 60);
-        const seg = totalSeg % 60;
-        setRelojCalentamiento(
-          `${min.toString().padStart(2, "0")}:${seg.toString().padStart(2, "0")}`
-        );
-      } else {
-        setMostrarCalentamiento(false);
-      }
+  if (!document.documentElement.requestFullscreen) return null;
 
-      if (partido?.descanso?.activo && partido.descanso.fin > Date.now()) {
-        const diff = Math.max(0, partido.descanso.fin - Date.now());
-        setMostrarDescanso(true);
-        const totalSeg = Math.floor(diff / 1000);
-        const min = Math.floor(totalSeg / 60);
-        const seg = totalSeg % 60;
-        setRelojDescanso(
-          `${min.toString().padStart(2, "0")}:${seg.toString().padStart(2, "0")}`
-        );
-      } else {
-        setMostrarDescanso(false);
+  return (
+    <button
+      type="button"
+      className="sb-fs"
+      style={{ opacity: visible ? 1 : 0, pointerEvents: visible ? "auto" : "none" }}
+      onClick={() =>
+        isFs ? document.exitFullscreen() : document.documentElement.requestFullscreen().catch(() => {})
       }
-    }, 500);
-    return () => clearInterval(interval);
+      aria-label={isFs ? "Salir de pantalla completa" : "Pantalla completa"}
+    >
+      {isFs ? <Minimize size={20} /> : <Maximize size={20} />}
+    </button>
+  );
+}
+
+export default function Tablero() {
+  const { codigo } = useParams();
+  const { partido, loading, error, eliminado } = usePartidoLive({ codigo });
+  const now = useNow();
+  useWakeLock();
+
+  useEffect(() => {
+    if (!partido) return;
+    const eq = (e) => [e.jugador1, e.jugador2].filter(Boolean).join("/");
+    document.title = `${partido.cancha ? `${partido.cancha} · ` : ""}${eq(partido.equipo1)} vs ${eq(partido.equipo2)}`;
+    return () => {
+      document.title = "SMASHR";
+    };
   }, [partido]);
 
   if (loading) {
+    return <Mensaje titulo="Cargando tablero…" />;
+  }
+
+  if (eliminado || error === "not_found" || !partido) {
     return (
-      <div className="min-h-screen bg-black text-white flex items-center justify-center">
-        <p className="text-2xl">Cargando tablero...</p>
-      </div>
+      <Mensaje
+        titulo={eliminado ? "Este partido fue eliminado" : "Tablero no encontrado"}
+        detalle={
+          eliminado
+            ? "El organizador eliminó este partido."
+            : error && error !== "not_found"
+              ? "Reintentando conexión…"
+              : "Revisá el link o pedile uno nuevo al organizador."
+        }
+      />
     );
   }
 
-  if (!partido) {
-    return (
-      <div
-        style={{
-          width: "100vw",
-          height: "100vh",
-          overflow: "hidden",
-          backgroundColor: "#000",
-          color: "#fff",
-        }}
-      >
-        <div id="main-layout">
-          <div id="board-container">
-            <div id="board" className="flex items-center justify-center">
-              <div className="text-center">
-                <p className="text-4xl font-bold mb-4">Esperando partido...</p>
-                <p className="text-xl text-gray-400">
-                  Crea un partido desde el panel de control
-                </p>
-              </div>
-            </div>
-          </div>
-          <BannerCarousel />
-        </div>
-      </div>
-    );
+  const calentando = partido.calentamiento?.activo && partido.calentamiento.fin > now;
+  const descansando = partido.descanso?.activo && partido.descanso.fin > now;
+
+  if (calentando) {
+    return <PausaScreen titulo="Calentamiento" reloj={cuentaRegresiva(partido.calentamiento.fin - now)} partido={partido} />;
+  }
+  if (descansando) {
+    return <PausaScreen titulo="Descanso" reloj={cuentaRegresiva(partido.descanso.fin - now)} partido={partido} />;
   }
 
-  if (mostrarCalentamiento) {
-    return (
-      <CalentamientoScreen reloj={relojCalentamiento} partido={partido} />
-    );
-  }
+  return <Marcador partido={partido} now={now} />;
+}
 
-  if (mostrarDescanso) {
-    return <DescansoScreen reloj={relojDescanso} partido={partido} />;
-  }
-
+function Marcador({ partido, now }) {
   const esSuperTieBreak =
-    partido.puntos.ultimoSetTieBreak &&
-    partido.puntos.set === parseInt(partido.juego.cantidadSets);
+    partido.puntos.ultimoSetTieBreak && partido.puntos.set === parseInt(partido.juego.cantidadSets);
+  const usarPuntos = !partido.juego.tiebreak && !esSuperTieBreak;
 
-  const usarPuntosGame = !partido.juego.tiebreak && !esSuperTieBreak;
-
-  let punto1 = usarPuntosGame
-    ? PUNTOS_GAME[partido.puntos.game[0]]
-    : partido.puntos.game[0];
-  let punto2 = usarPuntosGame
-    ? PUNTOS_GAME[partido.puntos.game[1]]
-    : partido.puntos.game[1];
-
-  const highlightAd = { backgroundColor: "#FFC107", color: "#37363D" };
-  const stylePuntaje1 = {};
-  const stylePuntaje2 = {};
-
+  let punto1 = usarPuntos ? PUNTOS_GAME[partido.puntos.game[0]] : partido.puntos.game[0];
+  let punto2 = usarPuntos ? PUNTOS_GAME[partido.puntos.game[1]] : partido.puntos.game[1];
+  let destacar1 = false;
+  let destacar2 = false;
   if (punto1 === "Ad") {
-    Object.assign(stylePuntaje1, highlightAd);
+    destacar1 = true;
     punto2 = 40;
   } else if (punto2 === "Ad") {
-    Object.assign(stylePuntaje2, highlightAd);
+    destacar2 = true;
     punto1 = 40;
   } else if (partido.puntos.puntoOro && punto1 === 40 && punto2 === 40) {
-    Object.assign(stylePuntaje1, highlightAd);
-    Object.assign(stylePuntaje2, highlightAd);
+    destacar1 = destacar2 = true;
   }
 
-  const servicio = partido.juego.servicio;
+  const ganador = partido.juego.equipoGanador;
   const sets = partido.puntos.sets || [];
+  const n = Math.max(1, sets.length);
   const setActual = partido.puntos.set || 1;
-  const hasCustomBg = Boolean(partido.pantalla_actual);
-  const boardBg = partido.pantalla_actual || DEFAULT_BOARD_BG;
-  const boardBgCss = boardBg.includes("(") ? boardBg : boardBg.replace(/"/g, '\\"');
+  const servicio = partido.juego.servicio;
+
+  const tiempo = ganador
+    ? partido.juego.tiempoTranscurridoAlFinalizar || 0
+    : now - partido.juego.inicio;
+
+  const customBg = partido.pantalla_actual;
+  const vars = {
+    "--n": n,
+    "--cols-land": `minmax(0, 2.4fr) minmax(0, 1fr) minmax(0, ${n * 0.8}fr)`,
+    "--cols-port": `minmax(0, 1fr) minmax(0, ${n * 0.75}fr)`,
+    ...(customBg ? { "--board-bg": `url("${customBg.replace(/"/g, '\\"')}")` } : {}),
+  };
+
+  const equipos = [
+    { eq: partido.equipo1, idx: 0, punto: punto1, destacar: destacar1, servs: [0, 1] },
+    { eq: partido.equipo2, idx: 1, punto: punto2, destacar: destacar2, servs: [2, 3] },
+  ];
 
   return (
-    <div
-      style={{
-        width: "100vw",
-        height: "100vh",
-        overflow: "hidden",
-        backgroundColor: "#000",
-        color: "#fff",
-      }}
-    >
-      <div id="main-layout">
-        <div id="board-container">
-          <div
-            id="board"
-            className={hasCustomBg ? "board--custom-bg" : undefined}
-            style={{
-              ["--board-bg"]: `url("${boardBgCss}")`,
-            }}
-          >
-            <div id="etapa">{partido.juego.etapa}</div>
+    <div className={`sb board-shell${customBg ? " sb--custom-bg" : ""}`} style={vars}>
+      <Header partido={partido} reloj={msToTime(tiempo)} />
 
-            <div id="score-panel">
-              <div className="team-block">
-                <JugadorRow
-                  id="jugador11"
-                  nombre={partido.equipo1.jugador1}
-                  color={partido.equipo1.color}
-                  mostrandoServicio={servicio === 0}
-                />
-                <JugadorRow
-                  id="jugador21"
-                  nombre={partido.equipo1.jugador2}
-                  color={partido.equipo1.color}
-                  mostrandoServicio={servicio === 1}
-                />
-                <div
-                  id="puntaje1"
-                  className="score-cell score-cell--game"
-                  style={stylePuntaje1}
-                >
-                  {punto1}
-                </div>
+      <main className="sb-main">
+        <div className="sb-panel">
+          <div className="sb-row sb-labels" aria-hidden>
+            <span className="sb-labels-names" />
+            <span className="sb-labels-game">{usarPuntos ? "Puntos" : "Tie-break"}</span>
+            <span className="sb-sets">
+              {sets.map((_, i) => (
+                <span key={i}>
+                  <span className="sb-lbl-long">Set </span>
+                  {i + 1}
+                </span>
+              ))}
+            </span>
+          </div>
+
+          {equipos.map(({ eq, idx, punto, destacar, servs }) => (
+            <div
+              key={idx}
+              className={`sb-row sb-team${ganador === `equipo${idx + 1}` ? " sb-team--winner" : ""}`}
+            >
+              <div className="sb-names" style={{ "--team": eq.color }}>
+                <NombreJugador nombre={eq.jugador1} saca={!ganador && servicio === servs[0]} />
+                <NombreJugador nombre={eq.jugador2} saca={!ganador && servicio === servs[1]} />
+              </div>
+              <div className={`sb-game${destacar ? " sb-game--hot" : ""}${ganador ? " sb-game--off" : ""}`}>
+                {ganador ? "" : punto}
+              </div>
+              <div className="sb-sets">
                 {sets.map((s, i) => (
                   <div
-                    key={`set-top-${i}`}
-                    id={`set${i + 1}1`}
-                    className={`score-cell score-cell--set${
-                      i + 1 === setActual ? " score-cell--set-current" : ""
+                    key={i}
+                    className={`sb-set${!ganador && i + 1 === setActual ? " sb-set--current" : ""}${
+                      (s[idx] || 0) > (s[1 - idx] || 0) && (ganador || i + 1 < setActual) ? " sb-set--won" : ""
                     }`}
                   >
-                    {s[0]}
-                  </div>
-                ))}
-              </div>
-
-              <div className="clock-row">
-                <div id="reloj">{tiempoTranscurrido}</div>
-              </div>
-
-              <div className="team-block">
-                <JugadorRow
-                  id="jugador12"
-                  nombre={partido.equipo2.jugador1}
-                  color={partido.equipo2.color}
-                  mostrandoServicio={servicio === 2}
-                />
-                <JugadorRow
-                  id="jugador22"
-                  nombre={partido.equipo2.jugador2}
-                  color={partido.equipo2.color}
-                  mostrandoServicio={servicio === 3}
-                />
-                <div
-                  id="puntaje2"
-                  className="score-cell score-cell--game"
-                  style={stylePuntaje2}
-                >
-                  {punto2}
-                </div>
-                {sets.map((s, i) => (
-                  <div
-                    key={`set-bot-${i}`}
-                    id={`set${i + 1}2`}
-                    className={`score-cell score-cell--set${
-                      i + 1 === setActual ? " score-cell--set-current" : ""
-                    }`}
-                  >
-                    {s[1]}
+                    {s[idx]}
                   </div>
                 ))}
               </div>
             </div>
-          </div>
+          ))}
         </div>
 
-        <BannerCarousel />
-      </div>
-
-      {partido.juego.equipoGanador && (
-        <div
-          id="cartel"
-          className="cartel-ganador"
-          style={{
-            textAlign: "center",
-            fontSize: "4vw",
-            padding: "2vh",
-            color: "white",
-            position: "absolute",
-            top: "2vh",
-            width: "76vw",
-            height: "22vh",
-            borderRadius: "7px",
-            boxShadow: "10px 5px 5px gray",
-            marginLeft: "12vw",
-            overflow: "hidden",
-            display: "flex",
-            flexDirection: "column",
-            justifyContent: "center",
-          }}
-        >
-          <div>Ganadores</div>
-          <div>
-            {partido[partido.juego.equipoGanador].jugador1} -{" "}
-            {partido[partido.juego.equipoGanador].jugador2}
+        {ganador && (
+          <div className="sb-winner cartel-ganador" role="status">
+            <span className="sb-winner-label">Ganadores</span>
+            <span className="sb-winner-names">
+              {partido[ganador].jugador1} – {partido[ganador].jugador2}
+            </span>
           </div>
-        </div>
-      )}
+        )}
+      </main>
+
+      <BannerCarousel />
+      <FullscreenButton />
     </div>
   );
 }
 
-function JugadorRow({ id, nombre, color, mostrandoServicio }) {
-  const rowRef = useRef(null);
-  const nameRef = useRef(null);
+function Header({ partido, reloj }) {
+  const sub = [partido.cancha, partido.juego.etapa].filter(Boolean).join(" · ");
+  return (
+    <header className="sb-header">
+      <img src="/assets/icono.webp" alt="" className="sb-logo" />
+      <div className="sb-title">
+        <div className="sb-torneo">{partido.torneo || "SMASHR"}</div>
+        {sub && <div className="sb-sub">{sub}</div>}
+      </div>
+      {reloj && <div className="sb-clock">{reloj}</div>}
+    </header>
+  );
+}
+
+function NombreJugador({ nombre, saca }) {
+  const boxRef = useRef(null);
+  const textRef = useRef(null);
 
   useLayoutEffect(() => {
-    const row = rowRef.current;
-    const nameEl = nameRef.current;
-    if (!row || !nameEl) return;
-
+    const box = boxRef.current;
+    const text = textRef.current;
+    if (!box || !text) return undefined;
     const fit = () => {
-      nameEl.style.fontSize = "";
-      let scale = 1;
-      while (nameEl.scrollWidth > nameEl.clientWidth && scale > 0.55) {
-        scale -= 0.05;
-        nameEl.style.fontSize = `calc(clamp(0.85rem, 2.2vmin, 2.2rem) * ${scale})`;
+      text.style.transform = "";
+      const ratio = text.clientWidth / Math.max(1, text.scrollWidth);
+      if (ratio < 1) {
+        text.style.transform = `scaleX(${Math.max(0.6, ratio)})`;
       }
     };
-
     fit();
     const ro = new ResizeObserver(fit);
-    ro.observe(row);
+    ro.observe(box);
     return () => ro.disconnect();
   }, [nombre]);
 
   return (
-    <div
-      ref={rowRef}
-      id={id}
-      className="name-cell"
-      style={{
-        backgroundImage: `linear-gradient(165deg, transparent 55%, ${color})`,
-      }}
-    >
-      <span ref={nameRef} className="name-text" title={nombre}>
-        {nombre}
+    <div ref={boxRef} className="sb-name">
+      <span ref={textRef} className="sb-name-text" title={nombre}>
+        {nombre || "—"}
       </span>
-      <span
-        className="ball-indicator"
-        style={{ visibility: mostrandoServicio ? "visible" : "hidden" }}
-        aria-hidden={!mostrandoServicio}
-      />
+      <span className={`sb-ball${saca ? " sb-ball--on" : ""}`} aria-label={saca ? "Saca" : undefined} />
     </div>
   );
 }
 
-function CalentamientoScreen({ reloj, partido }) {
+function PausaScreen({ titulo, reloj, partido }) {
+  const equipo = (e) => `${e.jugador1 || "—"} / ${e.jugador2 || "—"}`;
   return (
-    <div
-      className="flex flex-col text-white"
-      style={{
-        width: "100vw",
-        height: "100vh",
-        overflow: "hidden",
-        backgroundImage: "url('/assets/background_calentamiento.png')",
-        backgroundSize: "cover",
-        backgroundPosition: "center",
-      }}
-    >
-      <div className="h-[12vh] max-h-[110px] flex items-center justify-center shrink-0 pt-2">
-        <img
-          src="/assets/logo_torneo.png"
-          alt="Logo"
-          className="max-h-full max-w-[80%] object-contain"
-        />
-      </div>
-
-      <div className="flex-1 min-h-0 flex flex-col items-center justify-center px-4 gap-2 overflow-hidden">
-        <div className="jugadores bg-black/40 px-5 py-3 rounded-xl text-center text-xl sm:text-2xl font-bold">
-          {partido.equipo1.jugador1} / {partido.equipo1.jugador2}
+    <div className="pausa">
+      <Header partido={partido} />
+      <div className="pausa-body">
+        <div className="pausa-team" style={{ borderColor: partido.equipo1.color }}>
+          {equipo(partido.equipo1)}
         </div>
-        <div className="text-3xl font-bold text-yellow-500">VS</div>
-        <div className="jugadores bg-black/40 px-5 py-3 rounded-xl text-center text-xl sm:text-2xl font-bold">
-          {partido.equipo2.jugador1} / {partido.equipo2.jugador2}
+        <div className="pausa-vs">VS</div>
+        <div className="pausa-team" style={{ borderColor: partido.equipo2.color }}>
+          {equipo(partido.equipo2)}
         </div>
-        <div className="mt-1 flex justify-center items-center max-h-[22vh] overflow-hidden">
+        <div className="pausa-media">
           <MediaRotator />
         </div>
       </div>
-
-      <div className="barra-inferior bg-black/70 px-4 py-4 sm:py-6 text-center shrink-0">
-        <div className="text-lg sm:text-2xl font-semibold mb-1">Calentamiento</div>
-        <div className="text-[clamp(3.5rem,14vh,8rem)] font-black tracking-wider leading-none">
-          {reloj}
-        </div>
+      <div className="pausa-footer">
+        <div className="pausa-titulo">{titulo}</div>
+        <div className="pausa-reloj">{reloj}</div>
       </div>
     </div>
   );
 }
 
-function DescansoScreen({ reloj, partido }) {
+function Mensaje({ titulo, detalle }) {
   return (
-    <div
-      className="flex flex-col text-white"
-      style={{
-        width: "100vw",
-        height: "100vh",
-        overflow: "hidden",
-        backgroundImage: "url('/assets/background_calentamiento.png')",
-        backgroundSize: "cover",
-        backgroundPosition: "center",
-      }}
-    >
-      <div className="flex-1 min-h-0 flex flex-col items-center justify-center px-4 gap-2 overflow-hidden">
-        <div className="jugadores bg-black/40 px-5 py-3 rounded-xl text-center text-xl sm:text-2xl font-bold">
-          {partido.equipo1.jugador1} / {partido.equipo1.jugador2}
-        </div>
-        <div className="text-3xl font-bold text-yellow-500">VS</div>
-        <div className="jugadores bg-black/40 px-5 py-3 rounded-xl text-center text-xl sm:text-2xl font-bold">
-          {partido.equipo2.jugador1} / {partido.equipo2.jugador2}
-        </div>
-        <div className="mt-1 flex justify-center items-center max-h-[22vh] overflow-hidden">
-          <MediaRotator />
-        </div>
-      </div>
-
-      <div className="barra-inferior bg-black/70 px-4 py-4 sm:py-6 text-center shrink-0">
-        <div className="text-lg sm:text-2xl font-semibold mb-1">Descanso</div>
-        <div className="text-[clamp(3.5rem,14vh,8rem)] font-black tracking-wider leading-none">
-          {reloj}
-        </div>
-      </div>
+    <div className="board-shell flex min-h-[100dvh] flex-col items-center justify-center gap-3 p-6 text-center text-white">
+      <img src="/assets/icono.webp" alt="SMASHR" className="mb-2 h-16 w-16 rounded-full" />
+      <p className="text-2xl font-bold sm:text-4xl">{titulo}</p>
+      {detalle && <p className="text-base text-white/70 sm:text-xl">{detalle}</p>}
     </div>
   );
 }
 
-function msToTime(s) {
-  const ms = s % 1000;
-  s = (s - ms) / 1000;
-  const secs = s % 60;
-  s = (s - secs) / 60;
-  const mins = s % 60;
-  const hrs = (s - mins) / 60;
-  return (
-    String(hrs).padStart(2, "0") +
-    ":" +
-    String(mins).padStart(2, "0") +
-    ":" +
-    String(secs).padStart(2, "0")
-  );
+function cuentaRegresiva(ms) {
+  const total = Math.max(0, Math.ceil(ms / 1000));
+  return `${String(Math.floor(total / 60)).padStart(2, "0")}:${String(total % 60).padStart(2, "0")}`;
+}
+
+function msToTime(ms) {
+  const total = Math.max(0, Math.floor(ms / 1000));
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  return [h, m, s].map((v) => String(v).padStart(2, "0")).join(":");
 }

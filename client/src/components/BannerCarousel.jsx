@@ -47,13 +47,15 @@ export default function BannerCarousel() {
         .catch(() => {});
     };
     load();
-    const poll = setInterval(load, 10000);
+    const poll = setInterval(load, 60000);
     const onFocus = () => load();
     window.addEventListener("focus", onFocus);
+    window.addEventListener("smashr:publicidad", onFocus);
     return () => {
       cancelled = true;
       clearInterval(poll);
       window.removeEventListener("focus", onFocus);
+      window.removeEventListener("smashr:publicidad", onFocus);
     };
   }, []);
 

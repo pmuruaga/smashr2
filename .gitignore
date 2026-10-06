@@ -1,6 +1,8 @@
 node_modules/
 dist/
 *.db
+*.db.bak-*
+backups/
 .env
 .DS_Store
 server/uploads/

@@ -57,14 +57,18 @@ pm2 startup   # seguí la instrucción que imprime
 | Qué | Link |
 |-----|------|
 | Gestión (login) | `http://TU_IP:3001/` |
-| Tablero TV (público) | `http://TU_IP:3001/tablero` |
-| Password | `padel2025` |
+| Tablero de cada partido | botón **Compartir** del partido → `http://TU_IP:3001/tablero/CODIGO` |
+| Password | la de `ADMIN_PASSWORD` (default `padel2025`) |
 
 Decile al cliente:
 
 1. Abrí la **gestión**, entrás con la password.  
-2. En otra pestaña/dispositivo abrí el **tablero**.  
-3. Creá un partido y puntuá: el tablero se actualiza solo.
+2. Creá los partidos (pueden jugarse varios a la vez). Solo hacen falta los jugadores; torneo y cancha son opcionales.  
+3. En cada partido tocá **Compartir**: copiá el link, mandalo por WhatsApp o imprimí el QR.  
+4. Puntuá desde el control: el tablero de ese partido se actualiza solo.
+
+Para actualizar una instalación existente, ver la sección *Actualizar el VPS actual* en
+[DEPLOY.md](./DEPLOY.md).
 
 ---
 
